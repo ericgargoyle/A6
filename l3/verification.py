@@ -19,11 +19,16 @@ def check_facts(claims: List[Claim], evidence_list: List[Evidence]) -> List[Fact
         if not claim or claim.claim_type.lower() != 'factual':
             continue
             
-        # 1. Web search using ddgs with a clean query
-        clean_text = claim.claim_text.replace('"', '').replace("'", "")
-        # Limit query to reasonable search keywords length
-        words = clean_text.split()[:8]
-        search_query = " ".join(words)
+       # NEW CODE
+clean_text = claim.claim_text.replace('"', '').replace("'", "")
+query_prompt = f"""
+Extract 3 to 5 targeted search engine keywords to verify the truth of this statement.
+Do not use quotes, punctuation, or filler words. Return ONLY the keywords.
+Statement: {claim.claim_text}
+"""
+search_query = ask_ollama(query_prompt).strip().replace('"', '').replace('\n', ' ')
+if not search_query:
+    search_query = " ".join(clean_text.split()[:6])
         search_results = []
         try:
             with DDGS() as ddgs:
