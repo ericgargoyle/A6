@@ -10,75 +10,94 @@ def generate_scores(
     fact_checks: List[FactCheckResult],
     rebuttals: List[Rebuttal]
 ) -> FinalEvaluation:
-    
-    speakers = list(set([seg.speaker for seg in transcript.segments]))
+    # 1. Preserve original appearance order (Step 1)
+    speakers = list(dict.fromkeys([seg.speaker for seg in transcript.segments]))
     if len(speakers) < 2:
-        speakers = ["Speaker A", "Speaker B"] # Default if only one or zero found
-        
+        speakers = ["Speaker A", "Speaker B"]
     speaker_a, speaker_b = speakers[0], speakers[1]
-    
-    # Summarize data for the prompt
-    data_summary = {
-        "claims_count": len(claims),
-        "evidence_count": len(evidence),
-        "fact_checks": [{"id": fc.claim_id, "status": fc.status} for fc in fact_checks],
-        "rebuttals_count": len(rebuttals)
+
+    # 2. Map evidence and verification by claim ID
+    ev_map = {e.claim_id: e for e in evidence}
+    fc_map = {fc.claim_id: fc for fc in fact_checks}
+
+    def compile_speaker_case(spk):
+        case = []
+        spk_claims = [c for c in claims if c.speaker == spk]
+        for c in spk_claims:
+            ev = ev_map.get(c.claim_id)
+            fc = fc_map.get(c.claim_id)
+            case.append({
+                "claim": c.claim_text,
+                "type": c.claim_type,
+                "evidence": ev.evidence_text if ev else "No evidence cited",
+                "verification": fc.status if fc else "unverified"
+            })
+        return case
+
+    rebuttal_summary = [
+        {
+            "responder": r.responding_speaker,
+            "target_claim_id": r.target_claim_id,
+            "argument": r.rebuttal_text,
+            "effective": r.survived
+        }
+        for r in rebuttals
+    ]
+
+    detailed_data = {
+        speaker_a: compile_speaker_case(speaker_a),
+        speaker_b: compile_speaker_case(speaker_b),
+        "rebuttals": rebuttal_summary
     }
-    
+
     prompt = f"""
-    You are an objective analytical evaluator. Analyze the provided summary of claims, evidence, verification results, and responses between the two speakers.
-    Generate integer evaluation scores (from 0 to 100) for each speaker across the evaluation dimensions.
-    The determination of the leading speaker must depend strictly on logic, evidence quality, and response strength.
-    
-    Speakers: {speaker_a} and {speaker_b}
-    Analysis Summary: {json.dumps(data_summary)}
-    
-    Return ONLY a JSON object conforming exactly to this structure:
+    You are an impartial, elite debate adjudicator. Evaluate the debate between {speaker_a} and {speaker_b}.
+    Score each speaker from 0 to 100 on these metrics:
+    - logical_consistency: Coherence and lack of contradictions/fallacies.
+    - evidence_quality: Reliance on verified, credible facts vs unsupported assertions.
+    - rebuttal_strength: Directly dismantling the opponent's core points.
+    - relevance: Staying on topic without deflection.
+    - clarity: Articulation and structure.
+    - overall: Weighted synthesis of argument performance.
+
+    Debate Evidence & Claims:
+    {json.dumps(detailed_data, indent=2)}
+
+    Requirements:
+    1. Base scores strictly on the provided evidence verification and rebuttals above.
+    2. The 'reason' MUST quote or reference specific claims or failed arguments to defend why the winner won.
+    3. Return ONLY valid JSON matching this schema:
     {{
       "speaker_a": {{
-        "logical_consistency": <integer between 0 and 100>,
-        "evidence_quality": <integer between 0 and 100>,
-        "rebuttal_strength": <integer between 0 and 100>,
-        "relevance": <integer between 0 and 100>,
-        "clarity": <integer between 0 and 100>,
-        "overall": <integer between 0 and 100>
+        "logical_consistency": <int>, "evidence_quality": <int>, "rebuttal_strength": <int>,
+        "relevance": <int>, "clarity": <int>, "overall": <int>
       }},
       "speaker_b": {{
-        "logical_consistency": <integer between 0 and 100>,
-        "evidence_quality": <integer between 0 and 100>,
-        "rebuttal_strength": <integer between 0 and 100>,
-        "relevance": <integer between 0 and 100>,
-        "clarity": <integer between 0 and 100>,
-        "overall": <integer between 0 and 100>
+        "logical_consistency": <int>, "evidence_quality": <int>, "rebuttal_strength": <int>,
+        "relevance": <int>, "clarity": <int>, "overall": <int>
       }},
-      "winner": "Name of the winning speaker",
-      "reason": "Brief explanation of the outcome based on the metrics"
+      "winner": "{speaker_a}" or "{speaker_b}",
+      "reason": "<Detailed justification citing specific arguments>"
     }}
-    
-    Note: Substitute "speaker_a" and "speaker_b" keys with the actual speaker names: "{speaker_a}" and "{speaker_b}". 
-    Or you can keep keys as "speaker_a" and "speaker_b" but ensure the winner matches one of them.
     """
-    
+
     response_text = ask_ollama(prompt, json_format=True)
     try:
         data = json.loads(response_text)
-        
-        # Mapping back keys if the model used actual names
-        s_a_key = "speaker_a" if "speaker_a" in data else speaker_a
-        s_b_key = "speaker_b" if "speaker_b" in data else speaker_b
-        
+        s_a = data.get("speaker_a") or data.get(speaker_a, {})
+        s_b = data.get("speaker_b") or data.get(speaker_b, {})
+
         return FinalEvaluation(
-            speaker_a=data.get(s_a_key, {}),
-            speaker_b=data.get(s_b_key, {}),
+            speaker_a=s_a,
+            speaker_b=s_b,
             winner=data.get("winner", "Tie"),
-            reason=data.get("reason", "Could not determine.")
+            reason=data.get("reason", "Evaluation complete.")
         )
-    except json.JSONDecodeError:
-        print(f"Failed to parse L4 Scoring JSON: {response_text}")
-        # Return mock data on failure to prevent total crash
+    except Exception as e:
+        print(f"Scoring parsing error: {e}")
         return FinalEvaluation(
-            speaker_a={"logical_consistency": 0, "evidence_quality": 0, "rebuttal_strength": 0, "relevance": 0, "clarity": 0, "overall": 0},
-            speaker_b={"logical_consistency": 0, "evidence_quality": 0, "rebuttal_strength": 0, "relevance": 0, "clarity": 0, "overall": 0},
-            winner="Unknown",
-            reason="Analysis failed."
+            speaker_a={"logical_consistency": 50, "evidence_quality": 50, "rebuttal_strength": 50, "relevance": 50, "clarity": 50, "overall": 50},
+            speaker_b={"logical_consistency": 50, "evidence_quality": 50, "rebuttal_strength": 50, "relevance": 50, "clarity": 50, "overall": 50},
+            winner="Tie",
+            reason="Model output parsing failed."
         )
