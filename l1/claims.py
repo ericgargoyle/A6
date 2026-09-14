@@ -5,36 +5,37 @@ from models.schemas import Transcript, Claim
 from api.ollama_client import ask_ollama
 
 def extract_claims(transcript: Transcript) -> List[Claim]:
+    transcript_payload = [
+        {"segment_id": s.segment_id, "speaker": s.speaker, "text": s.text}
+        for s in transcript.segments
+    ]
+    
+    prompt = f"""
+    Analyze the full debate transcript and extract key arguments and claims made by each speaker.
+    Return ONLY a JSON array of objects where each object has:
+    - "segment_id": matching the segment where it occurred
+    - "speaker": speaker name
+    - "claim_text": concise statement of the proposition
+    - "claim_type": "factual", "moral", "policy", or "definition"
+
+    Transcript:
+    {json.dumps(transcript_payload)}
+    """
+    
+    response_text = ask_ollama(prompt, json_format=True)
     claims = []
-    for segment in transcript.segments:
-        prompt = f"""
-        Analyze the following text from the specified speaker and extract the main propositions or claims made.
-        Return the result ONLY as a JSON array of objects.
-        Each object should have:
-        - "claim_text": The claim or assertion made.
-        - "claim_type": The type of claim (factual, moral, policy, definition).
-        
-        Speaker: {segment.speaker}
-        Text: "{segment.text}"
-        """
-        response_text = ask_ollama(prompt, json_format=True)
-        try:
-            extracted_data = json.loads(response_text)
-            if not isinstance(extracted_data, list):
-                if 'claims' in extracted_data:
-                    extracted_data = extracted_data['claims']
-                else:
-                    extracted_data = [extracted_data]
-            
-            for item in extracted_data:
-                if 'claim_text' in item and 'claim_type' in item:
-                    claims.append(Claim(
-                        claim_id=str(uuid.uuid4()),
-                        speaker=segment.speaker,
-                        segment_id=segment.segment_id,
-                        claim_text=item['claim_text'],
-                        claim_type=item['claim_type']
-                    ))
-        except json.JSONDecodeError:
-            print(f"Failed to parse JSON from Ollama for L1 Claims: {response_text}")
+    try:
+        items = json.loads(response_text)
+        if isinstance(items, dict) and "claims" in items:
+            items = items["claims"]
+        for it in items:
+            claims.append(Claim(
+                claim_id=str(uuid.uuid4()),
+                speaker=it["speaker"],
+                segment_id=it["segment_id"],
+                claim_text=it["claim_text"],
+                claim_type=it.get("claim_type", "factual")
+            ))
+    except Exception as e:
+        print(f"Batch claims extraction error: {e}")
     return claims
